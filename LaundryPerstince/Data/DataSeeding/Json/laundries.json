@@ -1,0 +1,41 @@
+﻿[
+  {
+    "Id": 1,
+    "Name": "مغسلة النظافة",
+    "Address": "شارع التحرير، الدقي، الجيزة",
+    "Latitude": 30.0444,
+    "Longitude": 31.2357,
+    "Status": 1,
+    "Availability": 1,
+    "AverageRating": 4.5,
+    "TotalReviews": 120,
+    "AdminId": null,
+    "ImageUrl": "https://placehold.co/400x300?text=Laundry+Elnazafa"
+  },
+  {
+    "Id": 2,
+    "Name": "مغسلة الفردوس",
+    "Address": "شارع مصدق، المهندسين، الجيزة",
+    "Latitude": 30.0561,
+    "Longitude": 31.2101,
+    "Status": 1,
+    "Availability": 1,
+    "AverageRating": 4.2,
+    "TotalReviews": 85,
+    "AdminId": null,
+    "ImageUrl": "https://placehold.co/400x300?text=Laundry+Elfrdous"
+  },
+  {
+    "Id": 3,
+    "Name": "مغسلة الأمانة",
+    "Address": "شارع عباس العقاد، مدينة نصر، القاهرة",
+    "Latitude": 30.0626,
+    "Longitude": 31.3411,
+    "Status": 1,
+    "Availability": 2,
+    "AverageRating": 3.8,
+    "TotalReviews": 60,
+    "AdminId": null,
+    "ImageUrl": "https://placehold.co/400x300?text=Laundry+Elamana"
+  }
+]

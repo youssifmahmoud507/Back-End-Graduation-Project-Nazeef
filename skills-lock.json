@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "skills": {
+    "didit-face-match": {
+      "source": "didit-protocol/skills",
+      "sourceType": "github",
+      "computedHash": "338780239f848a5ebe0fd8eaaf585837d394e9961a06855daf04e556481f35d1"
+    },
+    "didit-id-document-verification": {
+      "source": "didit-protocol/skills",
+      "sourceType": "github",
+      "computedHash": "1ea3a4ce650ae4caaf7ad3e2f9ceadce3986a853abfd93f875d120eec68e9fdc"
+    },
+    "didit-liveness-detection": {
+      "source": "didit-protocol/skills",
+      "sourceType": "github",
+      "computedHash": "7b4b2ab046af04509fe45686163e79c1d899bd9b0438b52daf4ab637131b8bcd"
+    }
+  }
+}

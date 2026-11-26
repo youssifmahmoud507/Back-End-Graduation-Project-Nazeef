@@ -1,0 +1,11 @@
+.git
+.vs
+.github
+.agents
+bin/
+obj/
+out/
+appsettings.Development.json
+*.user
+*.db
+*.sqlite

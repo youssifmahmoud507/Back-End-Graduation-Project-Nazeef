@@ -1,0 +1,723 @@
+﻿diff --git a/NdeefApp/Controllers/AIVoiceController.cs b/NdeefApp/Controllers/AIVoiceController.cs
+index b12e09d..8d1b7d0 100644
+--- a/NdeefApp/Controllers/AIVoiceController.cs
++++ b/NdeefApp/Controllers/AIVoiceController.cs
+@@ -2,6 +2,8 @@ using System.Globalization;
+ using System.Net.WebSockets;
+ using System.Security.Claims;
+ using System.Text;
++using Microsoft.Extensions.Caching.Memory;
++using Microsoft.Extensions.DependencyInjection;
+ using System.Text.Json;
+ using System.Text.Json.Serialization;
+ using LaundryDomain.Models.SystemModules;
+@@ -58,6 +60,7 @@ namespace LaundryApi.Controllers
+             - لو الموضوع خلص بتسأل حاجة تانية: "في حاجة تانية ممكن أساعدك فيها يا أستاذ {USER_NAME}؟"
+             - بتستخدم اسمه بشكل طبيعي مش في كل جملة — زي ما الناس بتتكلم.
+ 
++
+             **أسلوب الكلام:**
+             - عربي مصري طبيعي، خفيف، مباشر.
+             - جمل قصيرة. مفيش قوائم ولا bullet points ولا ماركداون.
+@@ -65,6 +68,7 @@ namespace LaundryApi.Controllers
+             - لو بيكلمك إنجليزي، ردّ بإنجليزي بنفس الطابع الودي.
+             - ممنوع تبدأ بـ "بالطبع" أو "بكل سرور" — دي كلام بوتات.
+ 
++
+             **طريقة طلب أوردر:**
+             1. لو عنده تاريخ طلبات، ابدأ بـ: "تحب نكرر نفس الطلب من المرة اللي فاتت؟"
+             2. لو لأ، اعرض أقرب مغسلتين بتقييماتهم واسأله يفضل مين.
+@@ -72,11 +76,13 @@ namespace LaundryApi.Controllers
+             4. اتفق على الخدمات والكمية، احسب الإجمالي، واطلب موافقة صريحة.
+             5. لما يوافق، نفّذ place_order فوراً بدون تأخير.
+ 
++
+             **قواعد الإلغاء:**
+             - بس لو الحالة PendingConfirmation.
+             - أكّد رقم الطلب قبل الإلغاء بشكل طبيعي: "تمام، الطلب رقم كذا — أنا هلغيه دلوقتي؟"
+             - لو اتعدى المرحلة دي، قوله بوضوح وعرض بديل: "للأسف الطلب ده بقى مش قابل للإلغاء، تحب أقدم شكوى بدل كده؟"
+ 
++
+             **السياق المتاح:**
+             CUSTOMER_NAME: {USER_NAME}
+             ACTIVE_ORDERS: {ACTIVE_ORDERS}
+@@ -85,6 +91,7 @@ namespace LaundryApi.Controllers
+             WALLET_BALANCE: {WALLET_BALANCE}
+             SERVICE_PRICE_TABLE: {SERVICE_PRICE_TABLE}
+ 
++
+             **الأدوات المتاحة:**
+             cancel_order | get_active_orders | get_nearest_laundries | get_service_prices
+             get_laundry_services | calculate_order_price | place_order | track_order
+@@ -113,6 +120,9 @@ namespace LaundryApi.Controllers
+                            User.FindFirstValue("name") ??
+                            "يا فندم";
+                            
++            if (fullName == "يا فندم")
++                return fullName;
++
+             // Extract just the first name for a friendlier greeting
+             var firstName = fullName.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+             return !string.IsNullOrWhiteSpace(firstName) ? firstName : "يا فندم";
+@@ -151,7 +161,37 @@ namespace LaundryApi.Controllers
+             var modelName  = _config["Gemini:LiveModel"] ?? "models/gemini-3.1-flash-live-preview";
+             var apiVersion = _config["Gemini:LiveApiVersion"] ?? "v1beta";
+             var userId     = GetUserId();
+-            var userName   = GetUserName();
++            
++            // Try fetching name from token claims first, fallback to DB if not found
++            var userName = User.FindFirstValue(ClaimTypes.Name) ?? User.FindFirstValue("name");
++            if (string.IsNullOrWhiteSpace(userName) && !string.IsNullOrEmpty(userId))
++            {
++                try
++                {
++                    using var scope = _serviceProvider.CreateScope();
++                    var dbContext = scope.ServiceProvider.GetRequiredService<NadeefDbContext>();
++                    var user = await dbContext.Users.FindAsync(userId);
++                    if (user != null && !string.IsNullOrWhiteSpace(user.Name))
++                    {
++                        userName = user.Name;
++                    }
++                }
++                catch (Exception ex)
++                {
++                    _logger.LogWarning("Could not fetch user name from DB: {Msg}", ex.Message);
++                }
++            }
++            if (string.IsNullOrWhiteSpace(userName) || userName == "يا فندم")
++            {
++                userName = "يا فندم";
++            }
++            else
++            {
++                // Take the first name for a warmer tone
++                var first = userName.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
++                if (!string.IsNullOrWhiteSpace(first))
++                    userName = first;
++            }
+ 
+             var geminiUrl =
+                 "wss://generativelanguage.googleapis.com/ws/" +
+@@ -170,24 +210,41 @@ namespace LaundryApi.Controllers
+                 // إبلاغ التطبيق أسرع ما يمكن بأن الاتصال بدأ حتى لا يطول الانتظار
+                 await SendClientEventAsync(clientWs, new { type = "connecting_to_ai" });
+ 
+-                // ── Step 1: start DB context fetch in background immediately ─────
+-                var contextTask = BuildFullContextAsync(userId, userName);
++                // ── Step 1: Start DB context fetch in parallel ───────────────────
++                var contextTask = FetchVoiceContextAsync(userId);
+ 
+-                // ── Step 2: connect to Gemini immediately (in parallel) ──────────
++                // ── Step 2: Connect to Gemini in parallel ────────────────────────
+                 await geminiWs.ConnectAsync(new Uri(geminiUrl), cts.Token);
+                 _logger.LogInformation(
+                     "Gemini WS connected. User={UserId} Model={Model} ApiVersion={ApiVersion}",
+                     userId, modelName, apiVersion);
+ 
+-                // ── Step 3: build a FAST minimal setup with only static content ──
++                // Wait up to 10.0 seconds for the context to finish so we have it in the initial prompt!
++                VoiceContext initialCtx;
++                try
++                {
++                    initialCtx = await contextTask.WaitAsync(TimeSpan.FromSeconds(10.0), cts.Token);
++                }
++                catch (TimeoutException)
++                {
++                    _logger.LogWarning("Initial DB context fetch timed out, starting with default fallback values.");
++                    initialCtx = new VoiceContext(); // defaults (none, unknown, etc.)
++                }
++                catch (Exception ex)
++                {
++                    _logger.LogWarning("Failed initial DB context fetch: {Msg}", ex.Message);
++                    initialCtx = new VoiceContext();
++                }
++
++                // ── Step 3: build the system instruction prompt with actual data ──
+                 var voiceName   = _config["Gemini:LiveVoice"] ?? "Kore";
+-                var quickPrompt = VoiceSystemPrompt
++                var systemPrompt = VoiceSystemPrompt
+                     .Replace("{USER_NAME}",           userName)
+-                    .Replace("{ACTIVE_ORDERS}",       "جاري التحميل...")
+-                    .Replace("{ORDER_HISTORY}",       "جاري التحميل...")
+-                    .Replace("{NEAREST_LAUNDRIES}",   "جاري التحميل...")
+-                    .Replace("{WALLET_BALANCE}",      "جاري التحميل...")
+-                    .Replace("{SERVICE_PRICE_TABLE}", "جاري التحميل...");
++                    .Replace("{ACTIVE_ORDERS}",       initialCtx.ActiveOrders)
++                    .Replace("{ORDER_HISTORY}",       initialCtx.OrderHistory)
++                    .Replace("{NEAREST_LAUNDRIES}",   initialCtx.NearestLaundries)
++                    .Replace("{WALLET_BALANCE}",      initialCtx.WalletBalance)
++                    .Replace("{SERVICE_PRICE_TABLE}", initialCtx.ServicePriceTable);
+ 
+                 var quickSetup = new BidiGenerateContentSetup();
+                 quickSetup.Setup.Model = modelName;
+@@ -198,7 +255,7 @@ namespace LaundryApi.Controllers
+                 quickSetup.Setup.GenerationConfig.SpeechConfig.VoiceConfig.PrebuiltVoiceConfig.VoiceName = voiceName;
+                 quickSetup.Setup.RealtimeInputConfig.AutomaticActivityDetection.SilenceDurationMs = 200;
+                 quickSetup.Setup.RealtimeInputConfig.AutomaticActivityDetection.EndOfSpeechSensitivity = "END_SENSITIVITY_HIGH";
+-                quickSetup.Setup.SystemInstruction.Parts.Add(new BidiPart { Text = quickPrompt });
++                quickSetup.Setup.SystemInstruction.Parts.Add(new BidiPart { Text = systemPrompt });
+                 quickSetup.Setup.Tools.Add(new BidiTool
+                 {
+                     FunctionDeclarations = new List<BidiFunctionDeclaration>
+@@ -220,13 +277,13 @@ namespace LaundryApi.Controllers
+ 
+                 var setupBytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(quickSetup, _jsonOptions));
+                 await geminiWs.SendAsync(setupBytes, WebSocketMessageType.Text, true, cts.Token);
+-                _logger.LogInformation("Gemini setup sent (fast path). Awaiting setupComplete...");
++                _logger.LogInformation("Gemini setup sent. Awaiting setupComplete...");
+ 
+                 // ── Step 4: run upstream/downstream pump ───────────────────────
+                 var upstreamTask   = UpstreamAsync(clientWs, geminiWs, setupReady, cts.Token);
+                 var downstreamTask = DownstreamAsync(geminiWs, clientWs, setupReady, captionState, cts.Token);
+ 
+-                // ── Step 5: after setupComplete, inject context as hidden text ──
++                // ── Step 5: after setupComplete, inject context as hidden text if it finished late ──
+                 _ = Task.Run(async () =>
+                 {
+                     try
+@@ -235,7 +292,17 @@ namespace LaundryApi.Controllers
+                         if (!ready || cts.IsCancellationRequested) return;
+ 
+                         var ctx = await contextTask;
+-                        if (string.IsNullOrWhiteSpace(ctx) || geminiWs.State != WebSocketState.Open) return;
++                        if (geminiWs.State != WebSocketState.Open) return;
++
++                        // Construct the full context string to inject
++                        var ctxString = $"""
++                            CUSTOMER_NAME: {userName}
++                            ACTIVE_ORDERS: {ctx.ActiveOrders}
++                            ORDER_HISTORY: {ctx.OrderHistory}
++                            NEAREST_LAUNDRIES: {ctx.NearestLaundries}
++                            WALLET_BALANCE: {ctx.WalletBalance}
++                            SERVICE_PRICE_TABLE: {ctx.ServicePriceTable}
++                            """;
+ 
+                         // Send context as a system-like text turn (user role, no audio expected back)
+                         var ctxMsg = new
+@@ -244,7 +311,7 @@ namespace LaundryApi.Controllers
+                             {
+                                 turns = new[]
+                                 {
+-                                    new { role = "user", parts = new[] { new { text = $"[CONTEXT UPDATE]\n{ctx}" } } }
++                                    new { role = "user", parts = new[] { new { text = $"[CONTEXT UPDATE]\n{ctxString}" } } }
+                                 },
+                                 turnComplete = false
+                             }
+@@ -252,7 +319,7 @@ namespace LaundryApi.Controllers
+                         var ctxBytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(ctxMsg, _jsonOptions));
+                         if (geminiWs.State == WebSocketState.Open)
+                             await geminiWs.SendAsync(ctxBytes, WebSocketMessageType.Text, true, cts.Token);
+-                        _logger.LogInformation("Context injected into live session for User={UserId}", userId);
++                        _logger.LogInformation("Late context injected into live session for User={UserId}", userId);
+                     }
+                     catch (Exception ex)
+                     {
+@@ -280,9 +347,19 @@ namespace LaundryApi.Controllers
+             }
+         }
+ 
+-        // ── Build full DB context string for lazy injection after setup ────────
+-        private async Task<string> BuildFullContextAsync(string userId, string userName)
++        // ── Helper model and context fetcher ──────────────────────────────────
++        private class VoiceContext
+         {
++            public string ActiveOrders { get; set; } = "none";
++            public string OrderHistory { get; set; } = "none";
++            public string NearestLaundries { get; set; } = "none";
++            public string WalletBalance { get; set; } = "unknown";
++            public string ServicePriceTable { get; set; } = "none";
++        }
++
++        private async Task<VoiceContext> FetchVoiceContextAsync(string userId)
++        {
++            var ctx = new VoiceContext();
+             try
+             {
+                 var tActive = Task.Run(async () =>
+@@ -323,20 +400,17 @@ namespace LaundryApi.Controllers
+ 
+                 await Task.WhenAll(tActive, tHistory, tNearest, tWallet, tPrice);
+ 
+-                return $"""  
+-                    CUSTOMER_NAME: {userName}
+-                    ACTIVE_ORDERS: {await tActive}
+-                    ORDER_HISTORY: {await tHistory}
+-                    NEAREST_LAUNDRIES: {await tNearest}
+-                    WALLET_BALANCE: {await tWallet}
+-                    SERVICE_PRICE_TABLE: {await tPrice}
+-                    """;
++                ctx.ActiveOrders = await tActive;
++                ctx.OrderHistory = await tHistory;
++                ctx.NearestLaundries = await tNearest;
++                ctx.WalletBalance = await tWallet;
++                ctx.ServicePriceTable = await tPrice;
+             }
+             catch (Exception ex)
+             {
+-                _logger.LogWarning("Failed to build context: {Msg}", ex.Message);
+-                return string.Empty;
++                _logger.LogWarning("Failed fetching context data: {Msg}", ex.Message);
+             }
++            return ctx;
+         }
+ 
+         // =====================================================================
+@@ -372,55 +446,71 @@ namespace LaundryApi.Controllers
+             var textAccum   = new StringBuilder();
+             var micStats    = new MicForwardStats();
+ 
+-            while (!ct.IsCancellationRequested
+-                && clientWs.State == WebSocketState.Open
+-                && geminiWs.State == WebSocketState.Open)
++            try
+             {
+-                WebSocketReceiveResult res;
+-                try   { res = await clientWs.ReceiveAsync(new ArraySegment<byte>(buf), ct); }
+-                catch { break; }
+-
+-                if (res.MessageType == WebSocketMessageType.Close) break;
+-
+-                if (res.MessageType == WebSocketMessageType.Text)
++                while (!ct.IsCancellationRequested
++                    && clientWs.State == WebSocketState.Open
++                    && geminiWs.State == WebSocketState.Open)
+                 {
+-                    textAccum.Append(Encoding.UTF8.GetString(buf, 0, res.Count));
+-                    if (!res.EndOfMessage) continue;
++                    WebSocketReceiveResult res;
++                    try   { res = await clientWs.ReceiveAsync(new ArraySegment<byte>(buf), ct); }
++                    catch (Exception ex)
++                    {
++                        _logger.LogInformation("[WS Upstream] ReceiveAsync threw: {ExMsg}", ex.Message);
++                        break;
++                    }
+ 
+-                    var text = textAccum.ToString();
+-                    textAccum.Clear();
++                    if (res.MessageType == WebSocketMessageType.Close)
++                    {
++                        _logger.LogInformation("[WS Upstream] Received CLOSE frame from client.");
++                        break;
++                    }
+ 
+-                    if (text.Contains("\"finish_turn\"", StringComparison.OrdinalIgnoreCase))
++                    if (res.MessageType == WebSocketMessageType.Text)
+                     {
+-                        _logger.LogInformation("Received finish_turn trigger from client. Forcing Gemini response.");
+-                        var finishMsg = new
++                        textAccum.Append(Encoding.UTF8.GetString(buf, 0, res.Count));
++                        if (!res.EndOfMessage) continue;
++
++                        var text = textAccum.ToString();
++                        textAccum.Clear();
++
++                        if (text.Contains("\"finish_turn\"", StringComparison.OrdinalIgnoreCase))
+                         {
+-                            clientContent = new
++                            _logger.LogInformation("Received finish_turn trigger from client. Forcing Gemini response.");
++                            var finishMsg = new
+                             {
+-                                turns = new[] { new { role = "user", parts = Array.Empty<object>() } },
+-                                turnComplete = true
+-                            }
+-                        };
+-                        var finishBytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(finishMsg, _jsonOptions));
+-                        if (geminiWs.State == WebSocketState.Open)
+-                            await geminiWs.SendAsync(finishBytes, WebSocketMessageType.Text, true, ct);
++                                clientContent = new
++                                {
++                                    turns = new[] { new { role = "user", parts = Array.Empty<object>() } },
++                                    turnComplete = true
++                                }
++                            };
++                            var finishBytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(finishMsg, _jsonOptions));
++                            if (geminiWs.State == WebSocketState.Open)
++                                await geminiWs.SendAsync(finishBytes, WebSocketMessageType.Text, true, ct);
++                            continue;
++                        }
++
++                        if (TryExtractClientAudio(text, out var audioFromJson))
++                            await ForwardAudioToGeminiAsync(geminiWs, audioFromJson, ct, micStats, clientWs);
+                         continue;
+                     }
+ 
+-                    if (TryExtractClientAudio(text, out var audioFromJson))
+-                        await ForwardAudioToGeminiAsync(geminiWs, audioFromJson, ct, micStats, clientWs);
+-                    continue;
+-                }
+-
+-                if (res.MessageType != WebSocketMessageType.Binary || res.Count == 0)
+-                    continue;
++                    if (res.MessageType != WebSocketMessageType.Binary || res.Count == 0)
++                        continue;
+ 
+-                binaryAccum.Write(buf, 0, res.Count);
+-                if (!res.EndOfMessage) continue;
++                    binaryAccum.Write(buf, 0, res.Count);
++                    if (!res.EndOfMessage) continue;
+ 
+-                var audio = binaryAccum.ToArray();
+-                binaryAccum.SetLength(0);
+-                await ForwardAudioToGeminiAsync(geminiWs, audio, ct, micStats, clientWs);
++                    var audio = binaryAccum.ToArray();
++                    binaryAccum.SetLength(0);
++                    Console.WriteLine($"[WS Upstream] Received audio chunk from client: {audio.Length} bytes.");
++                    await ForwardAudioToGeminiAsync(geminiWs, audio, ct, micStats, clientWs);
++                }
++            }
++            finally
++            {
++                _logger.LogInformation("[WS Upstream] Loop exited. clientWs={ClientState}, geminiWs={GeminiState}, cancel={Cancel}", clientWs.State, geminiWs.State, ct.IsCancellationRequested);
+             }
+         }
+ 
+@@ -526,15 +616,18 @@ namespace LaundryApi.Controllers
+ 
+             stats.TotalBytes += audio.Length;
+ 
++            var inlineData = new BidiInlineData
++            {
++                MimeType = "audio/pcm;rate=16000",
++                Data     = Convert.ToBase64String(audio)
++            };
++
+             var msg = new BidiRealtimeInputMessage
+             {
+                 RealtimeInput = new BidiRealtimeInput
+                 {
+-                    Audio = new BidiInlineData
+-                    {
+-                        MimeType = "audio/pcm;rate=16000",
+-                        Data     = Convert.ToBase64String(audio)
+-                    }
++                    Audio = inlineData,
++                    MediaChunks = new List<BidiInlineData> { inlineData }
+                 }
+             };
+ 
+@@ -589,33 +682,44 @@ namespace LaundryApi.Controllers
+             var buf = new byte[65536];
+             var sb  = new StringBuilder();
+ 
+-            while (!ct.IsCancellationRequested
+-                && geminiWs.State == WebSocketState.Open
+-                && clientWs.State == WebSocketState.Open)
++            try
+             {
+-                WebSocketReceiveResult res;
+-                try
++                while (!ct.IsCancellationRequested
++                    && geminiWs.State == WebSocketState.Open
++                    && clientWs.State == WebSocketState.Open)
+                 {
+-                    res = await geminiWs.ReceiveAsync(new ArraySegment<byte>(buf), ct);
+-                }
+-                catch (Exception ex)
+-                {
+-                    _logger.LogWarning("Gemini WebSocket read failed or aborted: {Msg}", ex.Message);
+-                    break;
+-                }
++                    WebSocketReceiveResult res;
++                    try
++                    {
++                        res = await geminiWs.ReceiveAsync(new ArraySegment<byte>(buf), ct);
++                    }
++                    catch (Exception ex)
++                    {
++                        _logger.LogWarning("Gemini WebSocket read failed or aborted: {Msg}", ex.Message);
++                        break;
++                    }
+ 
+-                if (res.MessageType == WebSocketMessageType.Close) break;
++                    if (res.MessageType == WebSocketMessageType.Close)
++                    {
++                        _logger.LogInformation("[WS Downstream] Received CLOSE frame from Gemini. Status: {Status}, Description: {Desc}", geminiWs.CloseStatus, geminiWs.CloseStatusDescription);
++                        break;
++                    }
+ 
+-                if (res.MessageType == WebSocketMessageType.Text || res.MessageType == WebSocketMessageType.Binary)
+-                {
+-                    sb.Append(Encoding.UTF8.GetString(buf, 0, res.Count));
+-                    if (res.EndOfMessage)
++                    if (res.MessageType == WebSocketMessageType.Text || res.MessageType == WebSocketMessageType.Binary)
+                     {
+-                        await ProcessGeminiMessageAsync(sb.ToString(), clientWs, geminiWs, setupReady, captionState, ct);
+-                        sb.Clear();
++                        sb.Append(Encoding.UTF8.GetString(buf, 0, res.Count));
++                        if (res.EndOfMessage)
++                        {
++                            await ProcessGeminiMessageAsync(sb.ToString(), clientWs, geminiWs, setupReady, captionState, ct);
++                            sb.Clear();
++                        }
+                     }
+                 }
+             }
++            finally
++            {
++                _logger.LogInformation("[WS Downstream] Loop exited. clientWs={ClientState}, geminiWs={GeminiState}, cancel={Cancel}", clientWs.State, geminiWs.State, ct.IsCancellationRequested);
++            }
+         }
+ 
+         // =====================================================================
+@@ -629,7 +733,8 @@ namespace LaundryApi.Controllers
+             VoiceCaptionState captions,
+             CancellationToken ct)
+         {
+-            _logger.LogDebug("Gemini message: {Json}", json);
++            var shortJson = json.Length > 300 ? json.Substring(0, 300) + "..." : json;
++            _logger.LogInformation("Received message from Gemini: {ShortJson}", shortJson);
+ 
+             if (json.Contains("\"error\"", StringComparison.Ordinal))
+             {
+@@ -1183,7 +1288,7 @@ namespace LaundryApi.Controllers
+                         }
+                         else if (method == PaymentMethod.Wallet)
+                         {
+-                        paymentMsg = "وتم خصم المبلغ من محفظتك بنجاح.";
++                            paymentMsg = "وتم خصم المبلغ من محفظتك بنجاح.";
+                         }
+                     }
+                     else
+@@ -1193,7 +1298,7 @@ namespace LaundryApi.Controllers
+ 
+                     return $"تم الأوردر بنجاح! رقم الأوردر {orderId}. {paymentMsg}";
+                 }
+-                return $"مقدرتش أعمل الأوردر. السبب: {result.ErrorMessage}";
++                return $"مقرارش أعمل الأوردر. السبب: {result.ErrorMessage}";
+             }
+             catch (Exception ex)
+             {
+@@ -1202,7 +1307,7 @@ namespace LaundryApi.Controllers
+             }
+         }
+ 
+-        // ── get_nearest_laundries ─────────────────────────────────────────────
++
+         private async Task<object> GetNearestLaundriesToolAsync(string userId)
+         {
+             if (string.IsNullOrEmpty(userId))
+@@ -1233,7 +1338,7 @@ namespace LaundryApi.Controllers
+ 
+             if (laundries.Count == 0) return "مفيش مغاسل متاحة دلوقتي.";
+ 
+-            return laundries
++            var topLaundries = laundries
+                 .Select(l => new
+                 {
+                     l.Id,
+@@ -1244,15 +1349,63 @@ namespace LaundryApi.Controllers
+                 })
+                 .OrderBy(x => x.DistKm)
+                 .Take(3)
+-                .Select(x => (object)new
+-                {
+-                    id       = x.Id,
+-                    name     = x.Name,
+-                    address  = x.Address,
+-                    rating   = x.AverageRating.ToString("0.0", CultureInfo.InvariantCulture),
+-                    distance = $"{x.DistKm.ToString("0.00", CultureInfo.InvariantCulture)} كم"
+-                })
+                 .ToList();
++
++            var resultList = new List<object>();
++            var nearest = topLaundries.FirstOrDefault();
++            if (nearest != null)
++            {
++                var nearestPrices = await dbContext.Services
++                    .Where(s => s.LaundryId == nearest.Id && s.IsAvailable)
++                    .Select(s => new { s.ServiceName, s.Price })
++                    .OrderBy(s => s.ServiceName)
++                    .Take(15)
++                    .ToListAsync();
++
++                var marketAvgPrices = await dbContext.Services
++                    .Where(s => s.IsAvailable)
++                    .GroupBy(s => s.ServiceName)
++                    .Select(g => new
++                    {
++                        ServiceName = g.Key,
++                        AvgPrice = Math.Round(g.Average(x => x.Price), 2)
++                    })
++                    .OrderBy(x => x.ServiceName)
++                    .Take(15)
++                    .ToListAsync();
++
++                foreach (var l in topLaundries)
++                {
++                    if (l.Id == nearest.Id)
++                    {
++                        resultList.Add(new
++                        {
++                            id = l.Id,
++                            name = l.Name,
++                            address = l.Address,
++                            rating = l.AverageRating.ToString("0.0", CultureInfo.InvariantCulture),
++                            distance = $"{l.DistKm.ToString("0.00", CultureInfo.InvariantCulture)} كم",
++                            is_nearest = true,
++                            services_and_prices = nearestPrices.Select(p => new { service = p.ServiceName, price = $"{p.Price.ToString("0.##", CultureInfo.InvariantCulture)} جنيه" }).ToList(),
++                            market_average_prices = marketAvgPrices.Select(p => new { service = p.ServiceName, avg_price = $"{p.AvgPrice.ToString("0.##", CultureInfo.InvariantCulture)} جنيه" }).ToList()
++                        });
++                    }
++                    else
++                    {
++                        resultList.Add(new
++                        {
++                            id = l.Id,
++                            name = l.Name,
++                            address = l.Address,
++                            rating = l.AverageRating.ToString("0.0", CultureInfo.InvariantCulture),
++                            distance = $"{l.DistKm.ToString("0.00", CultureInfo.InvariantCulture)} كم",
++                            is_nearest = false
++                        });
++                    }
++                }
++            }
++
++            return resultList;
+         }
+ 
+         // =====================================================================
+@@ -1323,27 +1476,93 @@ namespace LaundryApi.Controllers
+                 double lat = (double)addr.Latitude.Value;
+                 double lon = (double)addr.Longitude.Value;
+ 
+-                var laundries = await dbContext.Laundries
+-                    .Where(l => l.Status == LaundryStatus.Active && l.Availability == LaundryAvailability.Open)
+-                    .Select(l => new { l.Id, l.Name, l.Address, l.Latitude, l.Longitude, l.AverageRating })
+-                    .ToListAsync();
++                var cache = _serviceProvider.GetService<IMemoryCache>();
++                List<ActiveLaundryDto> laundriesList = null;
++                if (cache != null && cache.TryGetValue<List<ActiveLaundryDto>>("Voice_ActiveLaundries", out var cachedLaundries))
++                {
++                    laundriesList = cachedLaundries;
++                }
++                else
++                {
++                    var queryResult = await dbContext.Laundries
++                        .Where(l => l.Status == LaundryStatus.Active && l.Availability == LaundryAvailability.Open)
++                        .Select(l => new ActiveLaundryDto
++                        {
++                            Id = l.Id,
++                            Name = l.Name,
++                            Address = l.Address,
++                            Latitude = l.Latitude,
++                            Longitude = l.Longitude,
++                            AverageRating = (decimal)l.AverageRating
++                        })
++                        .ToListAsync();
++
++                    laundriesList = queryResult;
++                    if (cache != null)
++                    {
++                        cache.Set("Voice_ActiveLaundries", queryResult, TimeSpan.FromMinutes(2));
++                    }
++                }
+ 
+-                if (laundries.Count == 0) return "none";
++                if (laundriesList == null || laundriesList.Count == 0) return "none";
+ 
+                 var sb = new StringBuilder();
+-                foreach (var l in laundries
++                var topLaundries = laundriesList
+                     .Select(l => new
+                     {
+                         l.Id, l.Name, l.Address, l.AverageRating,
+                         Dist = Haversine(lat, lon, (double)l.Latitude, (double)l.Longitude)
+                     })
+                     .OrderBy(x => x.Dist)
+-                    .Take(3))
++                    .Take(3)
++                    .ToList();
++
++                foreach (var l in topLaundries)
+                 {
+                     sb.AppendLine(
+                         $"- ID:{l.Id} | {l.Name} | {l.Dist.ToString("0.00", CultureInfo.InvariantCulture)} كم | " +
+                         $"rating:{l.AverageRating.ToString("0.0", CultureInfo.InvariantCulture)} | {l.Address}");
+                 }
++
++                var nearest = topLaundries.FirstOrDefault();
++                if (nearest != null)
++                {
++                    var nearestPrices = await dbContext.Services
++                        .Where(s => s.LaundryId == nearest.Id && s.IsAvailable)
++                        .Select(s => new { s.ServiceName, s.Price })
++                        .OrderBy(s => s.ServiceName)
++                        .Take(10)
++                        .ToListAsync();
++
++                    if (nearestPrices.Count > 0)
++                    {
++                        sb.AppendLine($"PRICES_FOR_NEAREST_LAUNDRY ({nearest.Name}):");
++                        foreach (var p in nearestPrices)
++                        {
++                            sb.AppendLine($"  * {p.ServiceName}: {p.Price.ToString("0.##", CultureInfo.InvariantCulture)} جم");
++                        }
++                    }
++                    else
++                    {
++                        var avgPrices = await dbContext.Services
++                            .Where(s => s.IsAvailable)
++                            .GroupBy(s => s.ServiceName)
++                            .Select(g => new { ServiceName = g.Key, Avg = g.Average(x => x.Price) })
++                            .OrderBy(x => x.ServiceName)
++                            .Take(10)
++                            .ToListAsync();
++
++                        if (avgPrices.Count > 0)
++                        {
++                            sb.AppendLine("PRICES_FOR_NEAREST_LAUNDRY (market averages):");
++                            foreach (var p in avgPrices)
++                            {
++                                sb.AppendLine($"  * {p.ServiceName}: avg {p.Avg.ToString("0.##", CultureInfo.InvariantCulture)} جم");
++                            }
++                        }
++                    }
++                }
++
+                 return sb.ToString().Trim();
+             }
+             catch { return "none"; }
+@@ -1368,6 +1587,12 @@ namespace LaundryApi.Controllers
+ 
+         private async Task<string> BuildServicePriceContextAsync(NadeefDbContext dbContext)
+         {
++            var cache = _serviceProvider.GetService<IMemoryCache>();
++            if (cache != null && cache.TryGetValue<string>("Voice_ServicePriceContext", out var cachedResult))
++            {
++                return cachedResult;
++            }
++
+             try
+             {
+                 var svc = await dbContext.Services
+@@ -1393,7 +1618,12 @@ namespace LaundryApi.Controllers
+                         $"min={s.Min.ToString("0.##", CultureInfo.InvariantCulture)}, " +
+                         $"max={s.Max.ToString("0.##", CultureInfo.InvariantCulture)} جم");
+ 
+-                return sb.ToString().Trim();
++                var result = sb.ToString().Trim();
++                if (cache != null)
++                {
++                    cache.Set("Voice_ServicePriceContext", result, TimeSpan.FromMinutes(10));
++                }
++                return result;
+             }
+             catch { return "none"; }
+         }
+@@ -1469,5 +1699,15 @@ namespace LaundryApi.Controllers
+             }
+             catch { /* ignore */ }
+         }
++
++        private class ActiveLaundryDto
++        {
++            public int Id { get; set; }
++            public string Name { get; set; }
++            public string Address { get; set; }
++            public decimal? Latitude { get; set; }
++            public decimal? Longitude { get; set; }
++            public decimal AverageRating { get; set; }
++        }
+     }
+ }
