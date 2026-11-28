@@ -8,6 +8,17 @@ namespace LaundryShared.Enums.CustomerEnums
     {
         public override ServiceCategory Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
         {
+            // يدعم الرقم (مثلاً في services.json: "Category": 3) والنص
+            if (reader.TokenType == JsonTokenType.Number)
+            {
+                return reader.TryGetInt32(out var number) && Enum.IsDefined(typeof(ServiceCategory), number)
+                    ? (ServiceCategory)number
+                    : ServiceCategory.Wash;
+            }
+
+            if (reader.TokenType == JsonTokenType.Null)
+                return ServiceCategory.Wash;
+
             var value = reader.GetString();
             if (string.IsNullOrEmpty(value))
                 return ServiceCategory.Wash;
