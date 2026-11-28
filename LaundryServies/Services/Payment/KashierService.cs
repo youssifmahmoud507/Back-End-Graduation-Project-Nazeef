@@ -93,8 +93,12 @@ namespace LaundryServies.Services.Payment
         {
             var url = $"{BaseUrl}/v3/payment/sessions";
             // Kashier often rejects localhost or HTTP. Using the actual production URL or HTTPS.
-            var baseUrlUi = FrontendBaseUrl.Contains("localhost") ? "https://ndeefapp-api.icydune-2fcf3dd1.germanywestcentral.azurecontainerapps.io" : FrontendBaseUrl;
-            var baseUrlApi = "https://ndeefapp-api.icydune-2fcf3dd1.germanywestcentral.azurecontainerapps.io"; // Always use remote server for webhooks when testing from localhost
+            // الـ URL العام للـ API (لازم HTTPS ومتاح لكاشير). بيتظبط من الـ config: Kashier:PublicApiBaseUrl
+            var publicApiBaseUrl = (_configuration["Kashier:PublicApiBaseUrl"] ?? _configuration["PublicApiBaseUrl"] ?? string.Empty).TrimEnd('/');
+            if (string.IsNullOrWhiteSpace(publicApiBaseUrl))
+                throw new InvalidOperationException("Kashier:PublicApiBaseUrl is not configured.");
+            var baseUrlUi = FrontendBaseUrl.Contains("localhost") ? publicApiBaseUrl : FrontendBaseUrl;
+            var baseUrlApi = publicApiBaseUrl;
             
             var redirectUrl = $"{baseUrlApi}/payment/callback?merchantOrderId={orderId}&amount={amount.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)}";
 
@@ -501,8 +505,7 @@ namespace LaundryServies.Services.Payment
         {
             try
             {
-                _logger.LogInformation("[Kashier Webhook] HandleWebhookAsync called. Signature: {Signature}, Event: {Event}, Mode: {Mode}", 
-                    signature, 
+                _logger.LogInformation("[Kashier Webhook] HandleWebhookAsync called. Event: {Event}, Mode: {Mode}", 
                     webhook?.Event, 
                     webhook?.Mode);
 

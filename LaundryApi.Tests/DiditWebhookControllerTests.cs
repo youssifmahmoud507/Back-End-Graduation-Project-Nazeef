@@ -35,7 +35,7 @@ namespace LaundryApi.Tests
                 _configMock.Object,
                 _memoryCache);
 
-            var explicitRedirect = "https://mycustomapp.com/success";
+            var explicitRedirect = "https://app.test.com/custom-success";
             var expectedSessionId = "test-session-123";
 
             _diditServiceMock.Setup(s => s.SyncVerificationStatusAsync(expectedSessionId))
@@ -54,6 +54,27 @@ namespace LaundryApi.Tests
             Assert.Contains(explicitRedirect, redirectResult.Url);
             Assert.Contains("sessionId=test-session-123", redirectResult.Url);
             Assert.Contains("status=Approved", redirectResult.Url);
+        }
+
+        [Fact]
+        public async Task CallbackRedirect_IgnoresForeignHostRedirect_ToPreventOpenRedirect()
+        {
+            var controller = new DiditWebhookController(
+                _diditServiceMock.Object,
+                new Mock<ILogger<DiditWebhookController>>().Object,
+                _configMock.Object,
+                _memoryCache);
+
+            var result = await controller.CallbackRedirect(
+                sessionId: null,
+                session_id: null,
+                verificationSessionId: null,
+                frontendRedirect: "https://evil.example.com/phish",
+                status: null);
+
+            var redirectResult = Assert.IsType<RedirectResult>(result);
+            Assert.DoesNotContain("evil.example.com", redirectResult.Url);
+            Assert.StartsWith("https://app.test.com", redirectResult.Url);
         }
 
         [Fact]

@@ -128,21 +128,18 @@ namespace LaundryServies.Services.Verification
                 }
 
                 // ── Signature validation (X-Signature-V2 canonical algorithm) ────────
-                if (!string.IsNullOrEmpty(secret) && !string.IsNullOrEmpty(signatureV2))
-                {
-                    if (!ValidateWebhookSignatureV2(rawBody, signatureV2, secret))
-                    {
-                        _logger.LogWarning("Invalid X-Signature-V2 for session {SessionId}. Falling back to direct Didit API fetch.", payload.SessionId);
+                // Fail-closed: لو مفيش secret أو توقيع أو التوقيع غلط، مش بنثق في أي حاجة في الـ payload
+                // (لا status ولا vendor_data). بنجيب الحالة والمستخدم من Didit API مباشرة.
+                var signatureOk = !string.IsNullOrEmpty(secret)
+                                  && !string.IsNullOrEmpty(signatureV2)
+                                  && ValidateWebhookSignatureV2(rawBody, signatureV2, secret);
 
-                        var directSession = await GetSessionStatusAsync(payload.SessionId);
-                        if (directSession == null)
-                        {
-                            _logger.LogError("Could not retrieve session {SessionId} from Didit API. Rejecting.", payload.SessionId);
-                            return false;
-                        }
-                        payload.Status = directSession.Status;
-                        _logger.LogInformation("Session {SessionId} status from Didit API: {Status}", payload.SessionId, payload.Status);
-                    }
+                if (!signatureOk)
+                {
+                    _logger.LogWarning("Didit webhook for session {SessionId} has missing/invalid signature. Ignoring payload and verifying via Didit API.", payload.SessionId);
+                    if (string.IsNullOrWhiteSpace(payload.SessionId))
+                        return false;
+                    return await SyncVerificationStatusAsync(payload.SessionId);
                 }
 
                 // ── Extract userId from vendor_data (format: userId_guid) ────────────

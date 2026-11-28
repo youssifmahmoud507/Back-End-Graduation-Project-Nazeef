@@ -56,7 +56,7 @@ namespace LaundryApi.Tests
 
             // Assert
             Assert.False(result.IsSuccess);
-            Assert.Equal("Invalid Email or Account is suspended.", result.ErrorMessage);
+            Assert.Equal("Invalid email or password.", result.ErrorMessage);
         }
 
         [Fact]
@@ -78,7 +78,7 @@ namespace LaundryApi.Tests
 
             // Assert
             Assert.False(result.IsSuccess);
-            Assert.Equal("Invalid Password.", result.ErrorMessage);
+            Assert.Equal("Invalid email or password.", result.ErrorMessage);
         }
 
         [Fact]
