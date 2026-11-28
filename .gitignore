@@ -404,3 +404,7 @@ MigrationBackup/
 # Fody
 FodyWeavers.xsd
 scratch/
+
+# Production / environment specific settings (never commit credentials)
+**/appsettings.Production.json
+**/appsettings.*.local.json

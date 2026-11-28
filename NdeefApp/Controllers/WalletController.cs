@@ -127,31 +127,5 @@ namespace LaundryApi.Controllers
 
             return Ok(new { Message = "Cash payment registered successfully" });
         }
-
-        // ============================================================
-        // Kashier Webhook — تحذير: هذا الـ Endpoint لا تسجّله في كاشير
-        // الـ Endpoint الصحيح الوحيد المسجّل عند كاشير هو:
-        //   POST /api/payment/webhook  (في PaymentController.cs)
-        // هذا الـ Endpoint هنا موجود فقط كـ fallback للطلبات القديمة
-        // ولا يجب الاعتماد عليه أو مراقبته للتحقق من نجاح عمليات الشحن
-        // ============================================================
-
-        /// <summary>
-        /// POST /api/wallet/webhook  [DEPRECATED — Fallback only]
-        /// الـ Endpoint الفعلي المسجّل عند Kashier هو /api/payment/webhook
-        /// هذا الـ Endpoint مش هيستقبل أي webhook من كاشير في الإعداد الحالي
-        /// </summary>
-        [HttpPost("webhook")]
-        [AllowAnonymous]
-        public async Task<IActionResult> HandleWebhook([FromHeader(Name = "x-kashier-signature")] string? signature, [FromBody] KashierWebhookDto webhook)
-        {
-            // Fallback: نفس المنطق الخاص بـ /api/payment/webhook
-            // لكن تأكد أن كاشير مسجّل فقط على /api/payment/webhook
-            var result = await _kashierService.HandleWebhookAsync(signature ?? string.Empty, webhook);
-
-            // دائماً نرجع 200 OK لكاشير حتى لو العملية غير ناجحة
-            // عشان نمنع Kashier من إعادة إرسال الـ Webhook مراراً (Retry Loop)
-            return Ok(new { received = true, success = result.IsSuccess });
-        }
     }
 }

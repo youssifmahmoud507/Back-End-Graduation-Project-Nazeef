@@ -628,7 +628,8 @@ namespace LaundryApi.Tests
         [Fact]
         public async Task VoiceInitialization_RealDatabase_IntegrationTest()
         {
-            var connStr = "Server=tcp:tiketapp-sqlsrv27005.database.windows.net,1433;Initial Catalog=NdeefDB;User ID=superadmin;Password=Super@Ticket2026;Encrypt=True;TrustServerCertificate=True;MultipleActiveResultSets=True;";
+            var connStr = Environment.GetEnvironmentVariable("NDEEF_TEST_CONNECTION");
+            if (string.IsNullOrWhiteSpace(connStr)) return; // integration test: set NDEEF_TEST_CONNECTION to run it
             var options = new DbContextOptionsBuilder<NadeefDbContext>()
                 .UseSqlServer(connStr)
                 .Options;
@@ -699,7 +700,8 @@ namespace LaundryApi.Tests
             Console.WriteLine($"User Id: {userId}");
             Console.WriteLine($"Nearest Laundries:\n{nearestLaundriesStr}");
 
-            var apiKey = "AIzaSyBkcb_hSOkNnsZ0ZwlRpkpgf_arVZ6FU7k";
+            var apiKey = Environment.GetEnvironmentVariable("NDEEF_TEST_GEMINI_API_KEY");
+            if (string.IsNullOrWhiteSpace(apiKey)) return; // integration test: set NDEEF_TEST_GEMINI_API_KEY to run it
             var query = "إيه أقرب مغسلة ليا وتفاصيلها إيه؟";
 
             var systemPrompt = $@"
@@ -746,7 +748,8 @@ NEAREST_LAUNDRIES: {nearestLaundriesStr}
         [Fact]
         public async Task VoiceInitialization_RealDatabase_CancelOrder_IntegrationTest()
         {
-            var connStr = "Server=tcp:tiketapp-sqlsrv27005.database.windows.net,1433;Initial Catalog=NdeefDB;User ID=superadmin;Password=Super@Ticket2026;Encrypt=True;TrustServerCertificate=True;MultipleActiveResultSets=True;";
+            var connStr = Environment.GetEnvironmentVariable("NDEEF_TEST_CONNECTION");
+            if (string.IsNullOrWhiteSpace(connStr)) return; // integration test: set NDEEF_TEST_CONNECTION to run it
             var options = new DbContextOptionsBuilder<NadeefDbContext>()
                 .UseSqlServer(connStr)
                 .Options;
@@ -848,7 +851,8 @@ NEAREST_LAUNDRIES: {nearestLaundriesStr}
         [Fact]
         public async Task VoiceInitialization_RealDatabase_PlaceOrder_IntegrationTest()
         {
-            var connStr = "Server=tcp:tiketapp-sqlsrv27005.database.windows.net,1433;Initial Catalog=NdeefDB;User ID=superadmin;Password=Super@Ticket2026;Encrypt=True;TrustServerCertificate=True;MultipleActiveResultSets=True;";
+            var connStr = Environment.GetEnvironmentVariable("NDEEF_TEST_CONNECTION");
+            if (string.IsNullOrWhiteSpace(connStr)) return; // integration test: set NDEEF_TEST_CONNECTION to run it
             var options = new DbContextOptionsBuilder<NadeefDbContext>()
                 .UseSqlServer(connStr)
                 .Options;
@@ -973,7 +977,8 @@ NEAREST_LAUNDRIES: {nearestLaundriesStr}
         [Fact]
         public async Task VoiceInitialization_RealDatabase_2MinutesConversation_IntegrationTest()
         {
-            var connStr = "Server=tcp:tiketapp-sqlsrv27005.database.windows.net,1433;Initial Catalog=NdeefDB;User ID=superadmin;Password=Super@Ticket2026;Encrypt=True;TrustServerCertificate=True;MultipleActiveResultSets=True;";
+            var connStr = Environment.GetEnvironmentVariable("NDEEF_TEST_CONNECTION");
+            if (string.IsNullOrWhiteSpace(connStr)) return; // integration test: set NDEEF_TEST_CONNECTION to run it
             var options = new DbContextOptionsBuilder<NadeefDbContext>()
                 .UseSqlServer(connStr)
                 .Options;
@@ -1023,7 +1028,8 @@ NEAREST_LAUNDRIES: {nearestLaundriesStr}
                 nearestLaundriesStr = sb.ToString().Trim();
             }
 
-            var apiKey = "AIzaSyBkcb_hSOkNnsZ0ZwlRpkpgf_arVZ6FU7k";
+            var apiKey = Environment.GetEnvironmentVariable("NDEEF_TEST_GEMINI_API_KEY");
+            if (string.IsNullOrWhiteSpace(apiKey)) return; // integration test: set NDEEF_TEST_GEMINI_API_KEY to run it
             var systemPrompt = $@"
 أنتَ ""نودي""، مساعد ذكي لتطبيق ""نظيف"" — منصة الغسيل الذكية في مصر.
 تتحدث بالعامية المصرية الودودة والمهذبة للغاية.

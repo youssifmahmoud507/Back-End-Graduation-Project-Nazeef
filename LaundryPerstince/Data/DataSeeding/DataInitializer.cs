@@ -21,10 +21,29 @@ namespace LaundryPerstince.Data.DataSeeding
     /// Performs initial seed for the database.
     /// Safe-guards automatic migration when the DB login lacks CREATE DATABASE permission.
     /// </summary>
+    public class SeedSuperAdmin
+    {
+        public string Email { get; set; } = string.Empty;
+        public string? Name { get; set; }
+        public string Password { get; set; } = string.Empty;
+    }
+
+    /// <summary>
+    /// Seeding options. Everything except the Identity roles and the services catalog is opt-in
+    /// (configured through the "Seed" section) so no default accounts or demo data ever reach production.
+    /// </summary>
+    public class SeedOptions
+    {
+        public bool Enabled { get; set; }
+        public string? DefaultPassword { get; set; }
+        public List<SeedSuperAdmin> SuperAdmins { get; set; } = new();
+    }
+
     public class DataInitializer
     {
-        public static async Task SeedAsync(NadeefDbContext context, UserManager<ApplicationUser> userManager, RoleManager<IdentityRole> roleManager, ILogger? logger = null)
+        public static async Task SeedAsync(NadeefDbContext context, UserManager<ApplicationUser> userManager, RoleManager<IdentityRole> roleManager, ILogger? logger = null, SeedOptions? options = null)
         {
+            options ??= new SeedOptions();
             // If we cannot connect to the target database, skip migration & seeding.
             // This avoids MigrateAsync trying to CREATE DATABASE when the login lacks permission.
             if (!await context.Database.CanConnectAsync())
@@ -53,47 +72,53 @@ namespace LaundryPerstince.Data.DataSeeding
             }
 
             // بنعمل Seed لكل الـ Roles و الـ Users
-            await SeedRolesAndUsersAsync(userManager, roleManager, logger);
+            await SeedRolesAndUsersAsync(userManager, roleManager, logger, options);
 
-            // بنعمل Seed للمغاسل لو مفيش
-            await SeedLaundriesAsync(context);
-
-            // بنعمل Seed للخدمات لو مفيش
+            // كتالوج الخدمات ضروري للتطبيق فبيتعمل دايماً
             await SeedServicesAsync(context);
 
-            // بنعمل Seed للـ Bundles لو مفيش
-            await SeedBundlesAsync(context, userManager, logger);
+            // بيانات الديمو (مغاسل / باقات / أوردرات) بتتعمل بس لو Seed:Enabled=true
+            if (!options.Enabled)
+            {
+                logger?.LogInformation("Demo seeding is disabled (Seed:Enabled=false). Skipping demo laundries, bundles and orders.");
+                return;
+            }
 
-            // بنعمل Seed للأوردرات لو مفيش
+            await SeedLaundriesAsync(context);
+            await SeedBundlesAsync(context, userManager, logger);
             await SeedOrdersAsync(context, userManager, roleManager, logger);
         }
 
         // ============================================================
         // Seed الأدوار والمستخدمين (Roles & Default Users)
         // ============================================================
-        private static async Task SeedRolesAndUsersAsync(UserManager<ApplicationUser> userManager, RoleManager<IdentityRole> roleManager, ILogger? logger = null)
+        private static async Task SeedRolesAndUsersAsync(UserManager<ApplicationUser> userManager, RoleManager<IdentityRole> roleManager, ILogger? logger = null, SeedOptions? options = null)
         {
             string[] roleNames = { "Customer", "Courier", "LaundryAdmin", "SuperAdmin" };
-            const string defaultSeedPassword = "Basel@2004";
 
-            // إنشاء الأدوار لو مش موجودة
+            // إنشاء الأدوار لو مش موجودة (دايماً)
             foreach (var roleName in roleNames)
             {
-                var roleExist = await roleManager.RoleExistsAsync(roleName);
-                if (!roleExist)
+                if (!await roleManager.RoleExistsAsync(roleName))
                 {
                     await roleManager.CreateAsync(new IdentityRole(roleName));
                 }
             }
 
-            // إنشاء مستخدم افتراضي لكل دور
-            foreach (var roleName in roleNames)
+            // الحسابات الافتراضية بتتعمل بس لو Seed:Enabled=true وفي باسورد من الـ configuration
+            if (options is null || !options.Enabled)
             {
-                var userEmail = $"{roleName.ToLower()}@ndeef.com";
-                var user = await userManager.FindByEmailAsync(userEmail);
+                return;
+            }
 
-                if (user == null)
+            var defaultSeedPassword = options.DefaultPassword;
+            if (!string.IsNullOrWhiteSpace(defaultSeedPassword))
+            {
+                foreach (var roleName in roleNames.Where(r => r != "SuperAdmin"))
                 {
+                    var userEmail = $"{roleName.ToLower()}@ndeef.com";
+                    if (await userManager.FindByEmailAsync(userEmail) != null) continue;
+
                     var newUser = new ApplicationUser
                     {
                         UserName = roleName,
@@ -112,138 +137,36 @@ namespace LaundryPerstince.Data.DataSeeding
                         AdminRejectionReason = null
                     };
 
-                    // إنشاء المستخدم بباسورد افتراضي
                     var result = await userManager.CreateAsync(newUser, defaultSeedPassword);
                     if (result.Succeeded)
                     {
-                        // ربطه بالرول بتاعه
                         await userManager.AddToRoleAsync(newUser, roleName);
                     }
                     else
                     {
-                        logger?.LogError($"فشل في إنشاء مستخدم {roleName}: {string.Join(", ", result.Errors.Select(e => e.Description))}");
-                    }
-                }
-                else
-                {
-                    // لو المستخدم موجود بالفعل نحدّث حالته للتأكد من تجاوز التحقق
-                    var updated = false;
-                    if (!user.EmailConfirmed)
-                    {
-                        user.EmailConfirmed = true;
-                        updated = true;
-                    }
-                    if (!user.IsEmailVerified)
-                    {
-                        user.IsEmailVerified = true;
-                        updated = true;
-                    }
-                    if (!user.IsActive)
-                    {
-                        user.IsActive = true;
-                        updated = true;
-                    }
-
-                    if (roleName == "LaundryAdmin")
-                    {
-                        if (!user.IsIdentityVerified)
-                        {
-                            user.IsIdentityVerified = true;
-                            updated = true;
-                        }
-
-                        if (user.AdminApprovalStatus != LaundryAdminApprovalStatus.Approved)
-                        {
-                            user.AdminApprovalStatus = LaundryAdminApprovalStatus.Approved;
-                            updated = true;
-                        }
-
-                        if (!string.IsNullOrWhiteSpace(user.AdminRejectionReason))
-                        {
-                            user.AdminRejectionReason = null;
-                            updated = true;
-                        }
-                    }
-
-                    if (updated)
-                    {
-                        await userManager.UpdateAsync(user);
-                    }
-
-                    // تأكد إن الباسورد الافتراضي مضبوط للحسابات الافتراضية حتى لو كانت موجودة قبل كده
-                    var hasPassword = await userManager.HasPasswordAsync(user);
-                    if (!hasPassword)
-                    {
-                        var addPasswordResult = await userManager.AddPasswordAsync(user, defaultSeedPassword);
-                        if (!addPasswordResult.Succeeded)
-                        {
-                            logger?.LogError("Failed to set default password for {RoleName}: {Errors}",
-                                roleName,
-                                string.Join(", ", addPasswordResult.Errors.Select(e => e.Description)));
-                        }
-                    }
-                    else
-                    {
-                        var passwordMatches = await userManager.CheckPasswordAsync(user, defaultSeedPassword);
-                        if (!passwordMatches)
-                        {
-                            var removePasswordResult = await userManager.RemovePasswordAsync(user);
-                            if (!removePasswordResult.Succeeded)
-                            {
-                                logger?.LogError("Failed to reset password for {RoleName}: {Errors}",
-                                    roleName,
-                                    string.Join(", ", removePasswordResult.Errors.Select(e => e.Description)));
-                            }
-                            else
-                            {
-                                var addPasswordResult = await userManager.AddPasswordAsync(user, defaultSeedPassword);
-                                if (!addPasswordResult.Succeeded)
-                                {
-                                    logger?.LogError("Failed to set default password for {RoleName} after reset: {Errors}",
-                                        roleName,
-                                        string.Join(", ", addPasswordResult.Errors.Select(e => e.Description)));
-                                }
-                            }
-                        }
-                    }
-
-                    // تأكد أن لديه الدور المطلوب
-                    var inRole = await userManager.IsInRoleAsync(user, roleName);
-                    if (!inRole)
-                    {
-                        await userManager.AddToRoleAsync(user, roleName);
+                        logger?.LogError("Failed to seed default {RoleName} user: {Errors}",
+                            roleName, string.Join(", ", result.Errors.Select(e => e.Description)));
                     }
                 }
             }
-
-            // ============================================================
-            // Seed Custom Super Admins
-            // ============================================================
-            var customSuperAdmins = new[]
+            else
             {
-                new { Email = "basel@nazeef.tech", Name = "Basel Ahmed", FirstName = "basel" },
-                new { Email = "fero@nazeef.tech", Name = "Fero", FirstName = "fero" },
-                new { Email = "yousif@nazeef.tech", Name = "Yousif", FirstName = "yousif" },
-                new { Email = "menna@nazeef.tech", Name = "Menna", FirstName = "menna" },
-                new { Email = "yasmin@nazeef.tech", Name = "Yasmin", FirstName = "yasmin" },
-                new { Email = "shahd@nazeef.tech", Name = "Shahd", FirstName = "shahd" },
-                new { Email = "DrM.Bahlol_IT@nazeef.tech", Name = "DrM Bahlol", FirstName = "DrM.Bahlol_IT" },
-                new { Email = "DrFarmawy_BU@nazeef.tech", Name = "DrFarmawy BU", FirstName = "DrFarmawy_BU" }
-            };
+                logger?.LogWarning("Seed:Enabled is true but Seed:DefaultPassword is empty. Default demo users were not created.");
+            }
 
-            foreach (var sa in customSuperAdmins)
+            // السوبر أدمن: الإيميلات والباسوردات بتيجي من الـ configuration (Seed:SuperAdmins) مش من الكود
+            foreach (var sa in options.SuperAdmins.Where(x => !string.IsNullOrWhiteSpace(x.Email) && !string.IsNullOrWhiteSpace(x.Password)))
             {
                 var user = await userManager.FindByEmailAsync(sa.Email);
-                string pwd = $"{sa.FirstName}@Admin";
-
                 if (user == null)
                 {
+                    var display = string.IsNullOrWhiteSpace(sa.Name) ? sa.Email : sa.Name!;
                     var newUser = new ApplicationUser
                     {
                         UserName = sa.Email,
                         Email = sa.Email,
-                        Name = sa.Name,
-                        FirstName = sa.FirstName,
+                        Name = display,
+                        FirstName = display,
                         LastName = "Admin",
                         Role = UserRole.SuperAdmin,
                         EmailConfirmed = true,
@@ -251,45 +174,18 @@ namespace LaundryPerstince.Data.DataSeeding
                         IsActive = true
                     };
 
-                    var result = await userManager.CreateAsync(newUser, pwd);
+                    var result = await userManager.CreateAsync(newUser, sa.Password);
                     if (result.Succeeded)
                     {
                         await userManager.AddToRoleAsync(newUser, "SuperAdmin");
                     }
                     else
                     {
-                        logger?.LogError($"فشل في إنشاء مدير {sa.Email}: {string.Join(", ", result.Errors.Select(e => e.Description))}");
+                        logger?.LogError("Failed to seed super admin {Email}: {Errors}",
+                            sa.Email, string.Join(", ", result.Errors.Select(e => e.Description)));
                     }
                 }
-                else
-                {
-                    // Update existing role to SuperAdmin if needed
-                    if (!await userManager.IsInRoleAsync(user, "SuperAdmin"))
-                    {
-                        await userManager.AddToRoleAsync(user, "SuperAdmin");
-                    }
-                    if (user.Role != UserRole.SuperAdmin)
-                    {
-                        user.Role = UserRole.SuperAdmin;
-                        await userManager.UpdateAsync(user);
-                    }
-
-                    // Reset/set password to ensure it matches the specified one
-                    var hasPassword = await userManager.HasPasswordAsync(user);
-                    if (!hasPassword)
-                    {
-                        await userManager.AddPasswordAsync(user, pwd);
-                    }
-                    else
-                    {
-                        var passwordMatches = await userManager.CheckPasswordAsync(user, pwd);
-                        if (!passwordMatches)
-                        {
-                            await userManager.RemovePasswordAsync(user);
-                            await userManager.AddPasswordAsync(user, pwd);
-                        }
-                    }
-                }
+                // مستخدم موجود: مفيش أي تعديل على الباسورد أو الصلاحيات
             }
         }
 
@@ -358,7 +254,7 @@ namespace LaundryPerstince.Data.DataSeeding
                         CreatedAt = DateTime.UtcNow
                     };
 
-                    var createResult = await userManager.CreateAsync(customer, "Basel@2004");
+                    var createResult = await userManager.CreateAsync(customer, $"Seed-{Guid.NewGuid():N}-aA1!");
                     if (!createResult.Succeeded)
                     {
                         logger?.LogError("Failed to seed customer {Email}: {Errors}", seed.Email,

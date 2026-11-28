@@ -27,7 +27,7 @@ namespace LaundryApi.Controllers
 
         private bool IsCourier()
         {
-            return true;
+            return User.IsInRole(UserRole.Courier.ToString());
         }
 
         // ──────────────────────────────────────────────

@@ -88,7 +88,7 @@ namespace LaundryApi.Controllers
             /// بيجيب كل التنبيهات المعلقة
             /// </summary>
             [HttpGet("alerts")]
-            //[Authorize(Roles = "SuperAdmin")] // temporarily removed for testing 
+            [Authorize(Roles = "SuperAdmin")]
             public async Task<IActionResult> GetPendingAlerts()
             {
                 var result = await _fraudService.GetPendingAlertsAsync();

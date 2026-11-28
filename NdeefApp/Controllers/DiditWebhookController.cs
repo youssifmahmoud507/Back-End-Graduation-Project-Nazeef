@@ -68,12 +68,10 @@ namespace LaundryApi.Controllers
             {
                 // Log ALL request details for debugging
                 _logger.LogInformation("=== WEBHOOK RECEIVED ===");
-                _logger.LogInformation("Headers: {Headers}", string.Join(", ", Request.Headers.Select(h => $"{h.Key}={h.Value}")));
                 _logger.LogInformation("SessionId: {SessionId}", payload.SessionId);
                 _logger.LogInformation("EventId: {EventId}", payload.EventId);
                 _logger.LogInformation("WebhookType: {WebhookType}", payload.WebhookType);
                 _logger.LogInformation("Status: {Status}", payload.Status);
-                _logger.LogInformation("VendorData: {VendorData}", payload.VendorData);
                 _logger.LogInformation("========================");
 
                 // Idempotency: dedupe on parsed.event_id (every delivery attempt has a unique id)
@@ -138,9 +136,17 @@ namespace LaundryApi.Controllers
             var frontendBaseUrl = _configuration["Didit:FrontendBaseUrl"]
                                   ?? _configuration["FrontendUrl"]
                                   ?? "https://www.nazeef.tech";
-            var redirectUrl = string.IsNullOrWhiteSpace(frontendRedirect)
-                ? $"{frontendBaseUrl.TrimEnd('/')}/laundry-admin/verification/success"
-                : frontendRedirect;
+            var defaultRedirect = $"{frontendBaseUrl.TrimEnd('/')}/laundry-admin/verification/success";
+            // منع الـ open redirect: مسموح بس بنفس الـ host بتاع الفرونت
+            var redirectUrl = defaultRedirect;
+            if (!string.IsNullOrWhiteSpace(frontendRedirect)
+                && Uri.TryCreate(frontendRedirect, UriKind.Absolute, out var requested)
+                && Uri.TryCreate(frontendBaseUrl, UriKind.Absolute, out var allowed)
+                && string.Equals(requested.Host, allowed.Host, StringComparison.OrdinalIgnoreCase)
+                && (requested.Scheme == Uri.UriSchemeHttps || requested.Scheme == Uri.UriSchemeHttp))
+            {
+                redirectUrl = frontendRedirect;
+            }
 
             if (!string.IsNullOrWhiteSpace(actualSessionId))
             {

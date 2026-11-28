@@ -1,4 +1,5 @@
 using LaundryApi.Controllers;
+using LaundryServies.Services.Payment;
 using LaundryServiesAbstraction.IServices.Payment;
 using LaundryShared.Common;
 using LaundryShared.DTO.PaymentKashier;
@@ -18,7 +19,8 @@ public class PaymentControllerTests
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["Kashier:FrontendBaseUrl"] = "https://www.nazeef.tech"
+                ["Kashier:FrontendBaseUrl"] = "https://www.nazeef.tech",
+                ["Kashier:PaymentApiKey"] = "test-secret"
             })
             .Build();
 
@@ -29,8 +31,9 @@ public class PaymentControllerTests
 
         var httpContext = new DefaultHttpContext();
         httpContext.Request.Host = new HostString("www.nazeef.tech");
-        httpContext.Request.QueryString = new QueryString(
-            "?status=success&merchant_order_id=wallet-charge-customer-123-987654321&paymentAmount=250.00");
+        const string signedPart = "status=success&merchant_order_id=wallet-charge-customer-123-987654321&paymentAmount=250.00";
+        var signature = KashierSignatureVerifier.ComputeHmacSha256Hex(signedPart, "test-secret");
+        httpContext.Request.QueryString = new QueryString($"?{signedPart}&signature={signature}&mode=test");
 
         controller.ControllerContext = new ControllerContext
         {
@@ -46,6 +49,49 @@ public class PaymentControllerTests
         Assert.Equal("wallet-charge-customer-123-987654321", fakeKashierService.LastMerchantOrderId);
         Assert.Equal(250.00m, fakeKashierService.LastAmount);
         Assert.Equal("success", fakeKashierService.LastStatus);
+    }
+
+    [Fact]
+    public async Task KashierCallback_WithoutValidSignature_DoesNotProcessPayment_AsSuccess()
+    {
+        var fakeKashierService = new FakeKashierService();
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Kashier:FrontendBaseUrl"] = "https://www.nazeef.tech",
+                ["Kashier:PaymentApiKey"] = "test-secret"
+            })
+            .Build();
+
+        var controller = new PaymentController(fakeKashierService, configuration, NullLogger<PaymentController>.Instance);
+        var httpContext = new DefaultHttpContext();
+        httpContext.Request.Host = new HostString("www.nazeef.tech");
+        httpContext.Request.QueryString = new QueryString(
+            "?status=success&merchant_order_id=wallet-charge-customer-123-987654321&paymentAmount=250.00&signature=forged");
+        controller.ControllerContext = new ControllerContext { HttpContext = httpContext };
+
+        var result = await controller.KashierCallback("success", null);
+
+        var redirect = Assert.IsType<RedirectResult>(result);
+        Assert.Contains("status=failed", redirect.Url);
+        Assert.NotEqual("success", fakeKashierService.LastStatus);
+    }
+
+    [Fact]
+    public async Task KashierWebhook_WithInvalidSignature_ReturnsUnauthorized()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["Kashier:PaymentApiKey"] = "test-secret" })
+            .Build();
+        var controller = new PaymentController(new FakeKashierService(), configuration, NullLogger<PaymentController>.Instance);
+        var httpContext = new DefaultHttpContext();
+        var body = "{\"event\":\"pay\",\"data\":{\"status\":\"SUCCESS\",\"signatureKeys\":[\"status\"]}}";
+        httpContext.Request.Body = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(body));
+        controller.ControllerContext = new ControllerContext { HttpContext = httpContext };
+
+        var result = await controller.KashierWebhook("bad-signature");
+
+        Assert.IsType<UnauthorizedObjectResult>(result);
     }
 
     private sealed class FakeKashierService : IKashierService

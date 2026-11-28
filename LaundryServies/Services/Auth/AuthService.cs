@@ -34,6 +34,14 @@ namespace LaundryServies.Services.Auth
 
         public async Task<Result<UserDto>> RegisterAsync(RegisterDto registerDto)
         {
+            // التسجيل العام مسموح بس للأدوار دي. SuperAdmin بيتعمل بس عن طريق الـ Seed أو من لوحة التحكم.
+            if (registerDto.Role != UserRole.Customer &&
+                registerDto.Role != UserRole.Courier &&
+                registerDto.Role != UserRole.LaundryAdmin)
+            {
+                return Result<UserDto>.Failure("Invalid role.");
+            }
+
             var existingUser = await _userManager.FindByEmailAsync(registerDto.Email);
             if (existingUser != null)
                 return Result<UserDto>.Failure("Email is already registered.");
@@ -91,11 +99,11 @@ namespace LaundryServies.Services.Auth
         {
             var user = await _userManager.FindByEmailAsync(loginDto.Email);
             if (user == null || !user.IsActive)
-                return Result<UserDto>.Failure("Invalid Email or Account is suspended."); // بدل الاكسبشن
+                return Result<UserDto>.Failure(InvalidCredentialsMessage); // رسالة موحدة عشان ما نكشفش الإيميلات المسجلة
 
             var result = await _signInManager.CheckPasswordSignInAsync(user, loginDto.Password, false);
             if (!result.Succeeded)
-                return Result<UserDto>.Failure("Invalid Password."); // بدل الاكسبشن
+                return Result<UserDto>.Failure(InvalidCredentialsMessage);
 
             // Skip email verification check for LaundryAdmin (they are auto-verified during registration)
             if (!user.IsEmailVerified && user.Role != UserRole.LaundryAdmin)
@@ -290,9 +298,16 @@ namespace LaundryServies.Services.Auth
             if (user.IsEmailVerified)
                 return Result<string>.Failure("Email is already verified.");
 
-            if (user.OtpCode != dto.OtpCode || user.OtpExpiry < DateTime.UtcNow)
-                return Result<string>.Failure("Invalid or expired OTP.");
+            if (OtpAttempts.IsLocked(dto.Email))
+                return Result<string>.Failure("Too many failed attempts. Please try again later.");
 
+            if (!OtpMatches(user.OtpCode, dto.OtpCode) || user.OtpExpiry < DateTime.UtcNow)
+            {
+                OtpAttempts.RegisterFailure(dto.Email);
+                return Result<string>.Failure("Invalid or expired OTP.");
+            }
+
+            OtpAttempts.Reset(dto.Email);
             user.IsEmailVerified = true;
             user.OtpCode = null;
             user.OtpExpiry = null;
@@ -361,8 +376,16 @@ namespace LaundryServies.Services.Auth
                 return Result<string>.Failure("User not found.");
 
             // Trim the OTP to prevent issues with trailing whitespaces from the frontend
-            if (string.IsNullOrEmpty(user.OtpCode) || user.OtpCode != dto.OtpCode?.Trim() || user.OtpExpiry < DateTime.UtcNow)
+            if (OtpAttempts.IsLocked(dto.Email))
+                return Result<string>.Failure("Too many failed attempts. Please try again later.");
+
+            if (string.IsNullOrEmpty(user.OtpCode) || !OtpMatches(user.OtpCode, dto.OtpCode?.Trim()) || user.OtpExpiry < DateTime.UtcNow)
+            {
+                OtpAttempts.RegisterFailure(dto.Email);
                 return Result<string>.Failure("Invalid or expired OTP.");
+            }
+
+            OtpAttempts.Reset(dto.Email);
 
             // Remove the old password directly to ensure it cannot be used anymore
             var hasPassword = await _userManager.HasPasswordAsync(user);
@@ -418,7 +441,53 @@ namespace LaundryServies.Services.Auth
         // ✅ الجديدة
         private string GenerateOtp()
         {
-            return Random.Shared.Next(100000, 999999).ToString();
+            // RNG آمن تشفيرياً (Random.Shared قابل للتخمين)
+            return System.Security.Cryptography.RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
+        }
+
+        private const string InvalidCredentialsMessage = "Invalid email or password.";
+
+        private static bool OtpMatches(string? stored, string? provided)
+        {
+            if (string.IsNullOrEmpty(stored) || string.IsNullOrEmpty(provided)) return false;
+            var a = Encoding.UTF8.GetBytes(stored);
+            var b = Encoding.UTF8.GetBytes(provided);
+            return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(a, b);
+        }
+
+        /// <summary>
+        /// عداد محاولات OTP الغلط (في الذاكرة): 5 محاولات غلط لكل إيميل خلال 10 دقايق وبعدها بيتقفل لحد ما الكود يتجدد أو الوقت يعدي.
+        /// </summary>
+        private static class OtpAttempts
+        {
+            private const int MaxAttempts = 5;
+            private static readonly TimeSpan Window = TimeSpan.FromMinutes(10);
+            private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (int Count, DateTime FirstFailure)> Failures = new();
+
+            private static string Key(string? email) => (email ?? string.Empty).Trim().ToLowerInvariant();
+
+            public static bool IsLocked(string? email)
+            {
+                if (!Failures.TryGetValue(Key(email), out var entry)) return false;
+                if (DateTime.UtcNow - entry.FirstFailure > Window)
+                {
+                    Failures.TryRemove(Key(email), out _);
+                    return false;
+                }
+                return entry.Count >= MaxAttempts;
+            }
+
+            public static void RegisterFailure(string? email)
+            {
+                Failures.AddOrUpdate(
+                    Key(email),
+                    _ => (1, DateTime.UtcNow),
+                    (_, old) => DateTime.UtcNow - old.FirstFailure > Window
+                        ? (1, DateTime.UtcNow)
+                        : (old.Count + 1, old.FirstFailure));
+            }
+
+            public static void Reset(string? email) => Failures.TryRemove(Key(email), out _);
         }
 
         private string GenerateJwtToken(ApplicationUser user)

@@ -1,4 +1,4 @@
-# Use standard ASP.NET Core 10.0 runtime base image
+# Use standard ASP.NET Core 9.0 runtime base image
 FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS base
 WORKDIR /app
 EXPOSE 7860

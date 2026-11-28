@@ -39,7 +39,9 @@ using LaundryServiesAbstraction.IServices.Services;
 using LaundryServiesAbstraction.IServices.SuperAdmin;
 using LaundryServiesAbstraction.IServices.User;
 using LaundryServiesAbstraction.IServices.Verification;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.OpenApi.Models;
+using System.Threading.RateLimiting;
 using System.Text.Json.Serialization;
 
 namespace NdeefApp
@@ -66,17 +68,35 @@ namespace NdeefApp
                 options.ResolveConflictingActions(apiDescriptions => apiDescriptions.First());
             });
 
-            // Allow any frontend domain to call the API
+            // CORS: الأصول المسموحة بتيجي من Cors:AllowedOrigins (مفصولة بفاصلة).
+            // في بيئة Development لو مفيش قيمة بنسمح بـ localhost بس، وفي غيرها بنسمح بدومين الفرونت.
+            var allowedOrigins = (builder.Configuration["Cors:AllowedOrigins"] ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (allowedOrigins.Length == 0)
+            {
+                allowedOrigins = builder.Environment.IsDevelopment()
+                    ? new[] { "http://localhost:3000", "https://localhost:3000", "http://localhost:3001" }
+                    : new[] { "https://www.nazeef.tech", "https://nazeef.tech" };
+            }
+
             builder.Services.AddCors(options =>
             {
                 options.AddPolicy("AllowAllFrontends", policy =>
                 {
                     policy
-                        .SetIsOriginAllowed(_ => true)
+                        .WithOrigins(allowedOrigins)
                         .AllowAnyHeader()
                         .AllowAnyMethod()
                         .AllowCredentials();
                 });
+            });
+
+            // لما الـ API يكون ورا reverse proxy (Azure / Hugging Face) لازم نقرا الـ IP الحقيقي للعميل
+            builder.Services.Configure<ForwardedHeadersOptions>(options =>
+            {
+                options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+                options.KnownNetworks.Clear();
+                options.KnownProxies.Clear();
             });
 
             builder.Services.AddApplicationServices(builder.Configuration);
@@ -109,9 +129,31 @@ namespace NdeefApp
 
             builder.Services.AddSignalR();
 
-            // Rate limiter disabled — frontend infinite-loop root cause is fixed.
-            // Re-enable and tune before going to production.
-            // builder.Services.AddRateLimiter(...);
+            // Rate limiting: حد عام لكل IP + حد أشد لـ endpoints الـ Auth (login / register / OTP / reset)
+            builder.Services.AddRateLimiter(options =>
+            {
+                options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+                options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
+                    RateLimitPartition.GetFixedWindowLimiter(
+                        httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                        _ => new FixedWindowRateLimiterOptions
+                        {
+                            PermitLimit = 600,
+                            Window = TimeSpan.FromMinutes(1),
+                            QueueLimit = 0
+                        }));
+
+                options.AddPolicy("auth", httpContext =>
+                    RateLimitPartition.GetFixedWindowLimiter(
+                        httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                        _ => new FixedWindowRateLimiterOptions
+                        {
+                            PermitLimit = 20,
+                            Window = TimeSpan.FromMinutes(1),
+                            QueueLimit = 0
+                        }));
+            });
 
             builder.Services.AddHttpClient<IPriceRecommendationService, PriceRecommendationService>(client =>
             {
@@ -191,6 +233,8 @@ namespace NdeefApp
 
             var app = builder.Build();
 
+            app.UseForwardedHeaders();
+
             app.UseExceptionHandler(errorApp =>
             {
                 errorApp.Run(async context =>
@@ -203,21 +247,36 @@ namespace NdeefApp
 
                     logger.LogError(exception, "Unhandled exception: {Message}", exception?.Message);
 
-                    await context.Response.WriteAsync(System.Text.Json.JsonSerializer.Serialize(new
+                    // تفاصيل الـ exception بتظهر بس في Development، في غيرها بنرجع رسالة عامة
+                    var env = context.RequestServices.GetRequiredService<IWebHostEnvironment>();
+                    if (env.IsDevelopment())
                     {
-                        message = exception?.Message,
-                        detail = exception?.InnerException?.Message,
-                        stackTrace = exception?.StackTrace
-                    }));
+                        await context.Response.WriteAsync(System.Text.Json.JsonSerializer.Serialize(new
+                        {
+                            message = exception?.Message,
+                            detail = exception?.InnerException?.Message,
+                            stackTrace = exception?.StackTrace
+                        }));
+                    }
+                    else
+                    {
+                        await context.Response.WriteAsync(System.Text.Json.JsonSerializer.Serialize(new
+                        {
+                            message = "An unexpected error occurred. Please try again later."
+                        }));
+                    }
                 });
             });
 
-            // Configure the HTTP request pipeline.
-            app.UseSwagger();
-            app.UseSwaggerUI(options =>
+            // Swagger بيشتغل بس في Development أو لو Swagger:Enabled=true
+            if (app.Environment.IsDevelopment() || app.Configuration.GetValue<bool>("Swagger:Enabled"))
             {
-                options.SwaggerEndpoint("/swagger/v1/swagger.json", "Ndeef API v1");
-            });
+                app.UseSwagger();
+                app.UseSwaggerUI(options =>
+                {
+                    options.SwaggerEndpoint("/swagger/v1/swagger.json", "Ndeef API v1");
+                });
+            }
 
             // Seed database
             using (var scope = app.Services.CreateScope())
@@ -227,7 +286,16 @@ namespace NdeefApp
                 var userManager = scope.ServiceProvider.GetRequiredService<Microsoft.AspNetCore.Identity.UserManager<LaundryDomain.Models.UserModules.ApplicationUser>>();
                 var roleManager = scope.ServiceProvider.GetRequiredService<Microsoft.AspNetCore.Identity.RoleManager<Microsoft.AspNetCore.Identity.IdentityRole>>();
 
-                await DataInitializer.SeedAsync(context, userManager, roleManager);
+                // الـ Seed (حسابات افتراضية + بيانات ديمو) مقفول افتراضياً ويتفعّل من الـ configuration (Seed:*)
+                var seedOptions = new SeedOptions
+                {
+                    Enabled = app.Configuration.GetValue<bool>("Seed:Enabled"),
+                    DefaultPassword = app.Configuration["Seed:DefaultPassword"]
+                };
+                app.Configuration.GetSection("Seed:SuperAdmins").Bind(seedOptions.SuperAdmins);
+
+                var seedLogger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+                await DataInitializer.SeedAsync(context, userManager, roleManager, seedLogger, seedOptions);
             }
 
 
@@ -246,12 +314,12 @@ namespace NdeefApp
                 await next();
             });
 
-            // app.UseRateLimiter(); // disabled — see AddRateLimiter comment above
-
             app.UseDefaultFiles();
             app.UseStaticFiles();
 
             app.UseCors("AllowAllFrontends");
+
+            app.UseRateLimiter();
 
             app.UseWebSockets(new WebSocketOptions
             {
@@ -263,6 +331,7 @@ namespace NdeefApp
 
             app.MapHub<NotificationHub>("/notifications-hub");
             app.MapControllers();
+            app.MapGet("/api/health", () => Results.Ok(new { status = "ok" }));
 
             await app.RunAsync();
         }
